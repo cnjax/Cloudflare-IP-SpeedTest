@@ -2,19 +2,17 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,19 +21,21 @@ import (
 )
 
 const (
-	requestURL  = "speed.cloudflare.com/cdn-cgi/trace" // 请求trace URL
-	timeout     = 1 * time.Second                      // 超时时间
-	maxDuration = 2 * time.Second                      // 最大持续时间
+	requestURL = "speed.cloudflare.com/cdn-cgi/trace" // 请求trace URL
+	timeout    = 1 * time.Second                      // 超时时间
+	//maxDuration = 2 * time.Second                      // 最大持续时间
 )
 
 var (
 	File         = flag.String("file", "ip.txt", "IP地址文件名称")                                   // IP地址文件名称
 	outFile      = flag.String("outfile", "ip.csv", "输出文件名称")                                  // 输出文件名称
-	defaultPort  = flag.Int("port", 443, "端口")                                                 // 端口
+	defaultPort  = flag.Int("port", 80, "端口")                                                  // 端口
+	quickmode    = flag.Int("quick", 0, "快递模式，每个子网挑个数，默认为0")                                   // 端口
 	maxThreads   = flag.Int("max", 100, "并发请求最大协程数")                                           // 最大协程数
-	speedTest    = flag.Int("speedtest", 5, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
+	speedTest    = flag.Int("speedtest", 0, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
 	speedTestURL = flag.String("url", "speed.cloudflare.com/__down?bytes=500000000", "测速文件地址") // 测速文件地址
-	enableTLS    = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
+	enableTLS    = flag.Bool("tls", false, "是否启用TLS")                                          // TLS是否启用
+	revertcolo   = flag.String("revertcolo", "", "是否反转colo,填入KIX，排除revertcolo部分，默认为空")         // 是否反转颜色      = flag.String("outfile", "ip.csv", "输出文件名称")                                  // 输出文件名称
 )
 
 type result struct {
@@ -62,26 +62,12 @@ type location struct {
 	City   string  `json:"city"`
 }
 
-// 尝试提升文件描述符的上限
-func increaseMaxOpenFiles() {
-	fmt.Println("正在尝试提升文件描述符的上限...")
-	cmd := exec.Command("bash", "-c", "ulimit -n 10000")
-	_, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("提升文件描述符上限时出现错误: %v\n", err)
-	} else {
-		fmt.Printf("文件描述符上限已提升!\n")
-	}
-}
-
 func main() {
 	flag.Parse()
-
-	startTime := time.Now()
-	osType := runtime.GOOS
-	if osType == "linux" {
-		increaseMaxOpenFiles()
+	if *defaultPort == 80 {
+		*enableTLS = false
 	}
+	startTime := time.Now()
 
 	var locations []location
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
@@ -94,7 +80,7 @@ func main() {
 
 		defer resp.Body.Close()
 
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
 			return
@@ -215,40 +201,51 @@ func main() {
 				return
 			}
 
-			duration := time.Since(start)
-			if duration > maxDuration {
+			//duration := time.Since(start)
+			//if duration > maxDuration {
+			//	return
+			//}
+			if resp.StatusCode != 200 {
 				return
 			}
-
-			buf := &bytes.Buffer{}
-			// 创建一个读取操作的超时
-			timeout := time.After(maxDuration)
-			// 使用一个 goroutine 来读取响应体
-			done := make(chan bool)
-			go func() {
-				_, err := io.Copy(buf, resp.Body)
-				done <- true
-				if err != nil {
-					return
-				}
-			}()
-			// 等待读取操作完成或者超时
-			select {
-			case <-done:
-				// 读取操作完成
-			case <-timeout:
-				// 读取操作超时
-				return
-			}
-
-			body := buf
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return
 			}
 
-			if strings.Contains(body.String(), "uag=Mozilla/5.0") {
-				if matches := regexp.MustCompile(`colo=([A-Z]+)`).FindStringSubmatch(body.String()); len(matches) > 1 {
+			//buf := &bytes.Buffer{}
+			//// 创建一个读取操作的超时
+			//timeout := time.After(maxDuration)
+			//// 使用一个 goroutine 来读取响应体
+			//done := make(chan bool)
+			//go func() {
+			//	_, err := io.Copy(buf, resp.Body)
+			//	done <- true
+			//	if err != nil {
+			//		return
+			//	}
+			//}()
+			//// 等待读取操作完成或者超时
+			//select {
+			//case <-done:
+			//	// 读取操作完成
+			//case <-timeout:
+			//	// 读取操作超时
+			//	return
+			//}
+			//
+			//body := buf
+			//if err != nil {
+			//	return
+			//}
+			if strings.Contains(string(body), "uag=Mozilla/5.0") {
+				if matches := regexp.MustCompile(`colo=([A-Z]+)`).FindStringSubmatch(string(body)); len(matches) > 1 {
 					dataCenter := matches[1]
+					if *revertcolo != "" && dataCenter == *revertcolo {
+						//skip the local colo
+						return
+					}
 					loc, ok := locationMap[dataCenter]
 					if ok {
 						fmt.Printf("发现有效IP %s 位置信息 %s 延迟 %d 毫秒\n", ip, loc.City, tcpDuration.Milliseconds())
@@ -362,8 +359,35 @@ func readIPs(File string) ([]string, error) {
 				fmt.Printf("无法解析CIDR格式的IP: %v\n", err)
 				continue
 			}
-			for ip := ip.Mask(ipNet.Mask); ipNet.Contains(ip); inc(ip) {
-				ips = append(ips, ip.String())
+			if *quickmode > 0 {
+				rand.Seed(time.Now().UnixNano())
+				//pick 3 random ips from the ipNet random
+				//fmt.Printf("quickmode") // Get the size of the mask
+				maskSize, _ := ipNet.Mask.Size()
+				numHosts := 1 << uint(32-maskSize)
+				randomIPs := make(map[string]struct{})
+
+				for len(randomIPs) < *quickmode+1 {
+					randomOffset := rand.Intn(numHosts)
+					ip := make(net.IP, len(ipNet.IP))
+					copy(ip, ipNet.IP)
+
+					for i := 0; i < len(ip); i++ {
+						ip[i] += byte(randomOffset >> (8 * (len(ip) - 1 - i)))
+					}
+
+					if ipNet.Contains(ip) {
+						randomIPs[ip.String()] = struct{}{}
+					}
+				}
+
+				for ip := range randomIPs {
+					ips = append(ips, ip)
+				}
+			} else {
+				for ip := ip.Mask(ipNet.Mask); ipNet.Contains(ip); inc(ip) {
+					ips = append(ips, ip.String())
+				}
 			}
 		} else {
 			ips = append(ips, ipAddr)
